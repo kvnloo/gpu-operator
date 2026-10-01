@@ -160,6 +160,119 @@ func TestDRADriverRenderGPUsCut(t *testing.T) {
 	assert.Equal(t, "nvidia.com/gpu", podSpec.Tolerations[0].Key)
 }
 
+func TestValidateDRADriverHealthcheckPorts(t *testing.T) {
+	tests := []struct {
+		name             string
+		configure        func(*nvidiav1alpha1.DRADriverSpec)
+		wantGPUsPort     int32
+		wantDomainsPort  int32
+		wantErr          bool
+	}{
+		{
+			name: "defaults remain distinct",
+			configure: func(spec *nvidiav1alpha1.DRADriverSpec) {
+				spec.ComputeDomains.Enabled = new(true)
+			},
+			wantGPUsPort:    defaultGPUsHealthcheckPort,
+			wantDomainsPort: defaultComputeDomainsHealthcheckPort,
+		},
+		{
+			name: "gpu override collides with compute domains default",
+			configure: func(spec *nvidiav1alpha1.DRADriverSpec) {
+				spec.ComputeDomains.Enabled = new(true)
+				spec.GPUs.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{
+					Port: new(int32(defaultComputeDomainsHealthcheckPort)),
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "compute domains override collides with gpu default",
+			configure: func(spec *nvidiav1alpha1.DRADriverSpec) {
+				spec.ComputeDomains.Enabled = new(true)
+				spec.ComputeDomains.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{
+					Port: new(int32(defaultGPUsHealthcheckPort)),
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "matching custom ports collide",
+			configure: func(spec *nvidiav1alpha1.DRADriverSpec) {
+				spec.ComputeDomains.Enabled = new(true)
+				port := int32(52000)
+				spec.GPUs.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{Port: &port}
+				spec.ComputeDomains.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{Port: &port}
+			},
+			wantErr: true,
+		},
+		{
+			name: "disabled compute domains do not collide",
+			configure: func(spec *nvidiav1alpha1.DRADriverSpec) {
+				spec.ComputeDomains.Enabled = new(false)
+				port := int32(52000)
+				spec.GPUs.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{Port: &port}
+				spec.ComputeDomains.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{Port: &port}
+			},
+			wantGPUsPort:    52000,
+			wantDomainsPort: 52000,
+		},
+		{
+			name: "disabled gpu healthcheck does not collide",
+			configure: func(spec *nvidiav1alpha1.DRADriverSpec) {
+				spec.ComputeDomains.Enabled = new(true)
+				spec.GPUs.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{
+					Enabled: new(false),
+				}
+			},
+			wantGPUsPort:    -1,
+			wantDomainsPort: defaultComputeDomainsHealthcheckPort,
+		},
+		{
+			name: "disabled compute domains healthcheck does not collide",
+			configure: func(spec *nvidiav1alpha1.DRADriverSpec) {
+				spec.ComputeDomains.Enabled = new(true)
+				spec.ComputeDomains.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{
+					Enabled: new(false),
+				}
+			},
+			wantGPUsPort:    defaultGPUsHealthcheckPort,
+			wantDomainsPort: -1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := sampleGPUCluster().Spec.DRADriver
+			tc.configure(&spec)
+
+			gpusPort, domainsPort, err := validateHealthcheckPorts(&spec)
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "configured for both gpus and computeDomains")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantGPUsPort, gpusPort)
+			assert.Equal(t, tc.wantDomainsPort, domainsPort)
+		})
+	}
+}
+
+func TestDRADriverRejectsHealthcheckPortCollision(t *testing.T) {
+	s := newTestDRAState(t)
+	cr := sampleGPUCluster()
+	cr.Spec.DRADriver.ComputeDomains.Enabled = new(true)
+	port := int32(52000)
+	cr.Spec.DRADriver.GPUs.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{Port: &port}
+	cr.Spec.DRADriver.ComputeDomains.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{Port: &port}
+
+	objs, err := s.getManifestObjects(context.Background(), cr, draSupportedCatalog())
+	require.Nil(t, objs)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "healthcheck port 52000")
+}
+
 func TestDRADriverHealthcheckPortOverride(t *testing.T) {
 	s := newTestDRAState(t)
 	cr := sampleGPUCluster()
