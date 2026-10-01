@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvmdev"
@@ -116,6 +117,47 @@ func Test_isValidComponent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateCUDADeviceNodes(t *testing.T) {
+	devRoot := t.TempDir()
+	devDir := filepath.Join(devRoot, "dev")
+	require.NoError(t, os.MkdirAll(devDir, 0755))
+
+	for _, name := range requiredCUDADeviceNodes {
+		require.NoError(t, os.Symlink("/dev/null", filepath.Join(devDir, name)))
+	}
+	require.NoError(t, validateCUDADeviceNodes(devRoot))
+
+	t.Run("missing UVM tools node", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "dev")
+		require.NoError(t, os.MkdirAll(dir, 0755))
+		require.NoError(t, os.Symlink("/dev/null", filepath.Join(dir, "nvidiactl")))
+		require.NoError(t, os.Symlink("/dev/null", filepath.Join(dir, "nvidia-uvm")))
+
+		err := validateCUDADeviceNodes(root)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "nvidia-uvm-tools")
+	})
+
+	t.Run("stale regular file is rejected", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "dev")
+		require.NoError(t, os.MkdirAll(dir, 0755))
+		for _, name := range requiredCUDADeviceNodes {
+			path := filepath.Join(dir, name)
+			if name == "nvidia-uvm-tools" {
+				require.NoError(t, os.WriteFile(path, nil, 0644))
+				continue
+			}
+			require.NoError(t, os.Symlink("/dev/null", path))
+		}
+
+		err := validateCUDADeviceNodes(root)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not a character device")
+	})
 }
 
 func Test_validateAdditionalDriverComponents(t *testing.T) {
