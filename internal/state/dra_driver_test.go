@@ -162,11 +162,11 @@ func TestDRADriverRenderGPUsCut(t *testing.T) {
 
 func TestValidateDRADriverHealthcheckPorts(t *testing.T) {
 	tests := []struct {
-		name             string
-		configure        func(*nvidiav1alpha1.DRADriverSpec)
-		wantGPUsPort     int32
-		wantDomainsPort  int32
-		wantErr          bool
+		name            string
+		configure       func(*nvidiav1alpha1.DRADriverSpec)
+		wantGPUsPort    int32
+		wantDomainsPort int32
+		wantErr         bool
 	}{
 		{
 			name: "defaults remain distinct",
@@ -180,8 +180,9 @@ func TestValidateDRADriverHealthcheckPorts(t *testing.T) {
 			name: "gpu override collides with compute domains default",
 			configure: func(spec *nvidiav1alpha1.DRADriverSpec) {
 				spec.ComputeDomains.Enabled = new(true)
+				port := defaultComputeDomainsHealthcheckPort
 				spec.GPUs.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{
-					Port: new(int32(defaultComputeDomainsHealthcheckPort)),
+					Port: &port,
 				}
 			},
 			wantErr: true,
@@ -190,8 +191,9 @@ func TestValidateDRADriverHealthcheckPorts(t *testing.T) {
 			name: "compute domains override collides with gpu default",
 			configure: func(spec *nvidiav1alpha1.DRADriverSpec) {
 				spec.ComputeDomains.Enabled = new(true)
+				port := defaultGPUsHealthcheckPort
 				spec.ComputeDomains.KubeletPlugin.Healthcheck = &nvidiav1alpha1.DRADriverHealthcheckSpec{
-					Port: new(int32(defaultGPUsHealthcheckPort)),
+					Port: &port,
 				}
 			},
 			wantErr: true,
