@@ -904,6 +904,16 @@ func (d *Driver) validate() error {
 		return fmt.Errorf("%w\n\n%s", err, msg)
 	}
 
+	// nvidia-smi can succeed before the UVM control nodes needed by CUDA
+	// workloads are present. Do not publish the driver-ready status file until
+	// those nodes are usable for a containerized driver. DRA / passthrough
+	// validation explicitly opts out through driver-validation-skip-gpu-init.
+	if !driverInfo.isHostDriver && !driverValidationSkipGPUInitFlag {
+		if err := validateCUDADeviceNodes(driverInfo.devRoot); err != nil {
+			return fmt.Errorf("CUDA device nodes are not ready: %w", err)
+		}
+	}
+
 	return d.createStatusFile(driverInfo)
 }
 
@@ -932,6 +942,26 @@ func isNvidiaModuleLoaded() bool {
 		}
 	}
 	return false
+}
+
+var requiredCUDADeviceNodes = []string{
+	"nvidiactl",
+	"nvidia-uvm",
+	"nvidia-uvm-tools",
+}
+
+func validateCUDADeviceNodes(devRoot string) error {
+	for _, name := range requiredCUDADeviceNodes {
+		path := filepath.Join(devRoot, "dev", name)
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("required device node %s: %w", path, err)
+		}
+		if info.Mode()&os.ModeCharDevice == 0 {
+			return fmt.Errorf("required device node %s is not a character device", path)
+		}
+	}
+	return nil
 }
 
 // createDevCharSymlinks creates symlinks in /host-dev-char that point to all possible NVIDIA devices nodes.
