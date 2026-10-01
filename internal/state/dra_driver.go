@@ -56,6 +56,23 @@ func resolveHealthcheckPort(hc *nvidiav1alpha1.DRADriverHealthcheckSpec, default
 	return defaultPort
 }
 
+func validateHealthcheckPorts(spec *nvidiav1alpha1.DRADriverSpec) (int32, int32, error) {
+	gpusPort := resolveHealthcheckPort(spec.GPUs.KubeletPlugin.Healthcheck, defaultGPUsHealthcheckPort)
+	computeDomainsPort := resolveHealthcheckPort(spec.ComputeDomains.KubeletPlugin.Healthcheck, defaultComputeDomainsHealthcheckPort)
+
+	if spec.IsComputeDomainsEnabled() &&
+		gpusPort >= 0 &&
+		computeDomainsPort >= 0 &&
+		gpusPort == computeDomainsPort {
+		return 0, 0, fmt.Errorf(
+			"DRA kubelet-plugin healthcheck port %d is configured for both gpus and computeDomains",
+			gpusPort,
+		)
+	}
+
+	return gpusPort, computeDomainsPort, nil
+}
+
 type stateDRADriver struct {
 	stateSkel
 }
@@ -118,18 +135,21 @@ func (s *stateDRADriver) getManifestObjects(ctx context.Context, cr *nvidiav1alp
 		return nil, fmt.Errorf("failed to get OpenShift version: %w", err)
 	}
 
+	gpusHealthcheckPort, computeDomainsHealthcheckPort, err := validateHealthcheckPorts(&cr.Spec.DRADriver)
+	if err != nil {
+		return nil, err
+	}
+
 	renderData := &draDriverRenderData{
-		DRADriver:             draDriverSpec,
-		HostPaths:             &hostPaths,
-		Daemonsets:            &daemonsets,
-		Namespace:             s.namespace,
-		OpenshiftVersion:      openshiftVersion,
-		DeviceClassAPIVersion: apiVersion,
-		FeatureGates:          cr.Spec.DRADriver.FeatureGates,
-		GPUsHealthcheckPort: resolveHealthcheckPort(
-			cr.Spec.DRADriver.GPUs.KubeletPlugin.Healthcheck, defaultGPUsHealthcheckPort),
-		ComputeDomainsHealthcheckPort: resolveHealthcheckPort(
-			cr.Spec.DRADriver.ComputeDomains.KubeletPlugin.Healthcheck, defaultComputeDomainsHealthcheckPort),
+		DRADriver:                      draDriverSpec,
+		HostPaths:                      &hostPaths,
+		Daemonsets:                     &daemonsets,
+		Namespace:                      s.namespace,
+		OpenshiftVersion:               openshiftVersion,
+		DeviceClassAPIVersion:          apiVersion,
+		FeatureGates:                   cr.Spec.DRADriver.FeatureGates,
+		GPUsHealthcheckPort:            gpusHealthcheckPort,
+		ComputeDomainsHealthcheckPort: computeDomainsHealthcheckPort,
 	}
 
 	return s.renderObjects(ctx, renderData)
