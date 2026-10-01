@@ -73,29 +73,33 @@ func (u *nvDriverUpdater) updateConditions(ctx context.Context, cr *nvidiav1alph
 	switch statusType {
 	case Ready:
 		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-			Type:    Ready,
-			Status:  metav1.ConditionTrue,
-			Reason:  reason,
-			Message: message,
+			Type:               Ready,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: instance.Generation,
+			Reason:             reason,
+			Message:            message,
 		})
 
 		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-			Type:   Error,
-			Status: metav1.ConditionFalse,
-			Reason: Ready,
+			Type:               Error,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: instance.Generation,
+			Reason:             Ready,
 		})
 	case Error:
 		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-			Type:   Ready,
-			Status: metav1.ConditionFalse,
-			Reason: Error,
+			Type:               Ready,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: instance.Generation,
+			Reason:             Error,
 		})
 
 		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-			Type:    Error,
-			Status:  metav1.ConditionTrue,
-			Reason:  reason,
-			Message: message,
+			Type:               Error,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: instance.Generation,
+			Reason:             reason,
+			Message:            message,
 		})
 
 		// Ensure status.state is not empty when updating the CR status.
