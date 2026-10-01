@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvmdev"
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
@@ -344,4 +345,40 @@ func TestCountNvidiaDevices(t *testing.T) {
 			require.Equal(t, tc.expected, countNvidiaDevices(tc.output))
 		})
 	}
+}
+
+
+func TestRetryContext(t *testing.T) {
+	original := maxWaitSecondsFlag
+	defer func() { maxWaitSecondsFlag = original }()
+
+	t.Run("zero keeps retry forever semantics", func(t *testing.T) {
+		maxWaitSecondsFlag = 0
+		ctx, cancel := retryContext(context.Background())
+		defer cancel()
+		_, hasDeadline := ctx.Deadline()
+		require.False(t, hasDeadline)
+	})
+
+	t.Run("positive value installs deadline", func(t *testing.T) {
+		maxWaitSecondsFlag = 2
+		before := time.Now().Add(1500 * time.Millisecond)
+		after := time.Now().Add(2500 * time.Millisecond)
+		ctx, cancel := retryContext(context.Background())
+		defer cancel()
+		deadline, hasDeadline := ctx.Deadline()
+		require.True(t, hasDeadline)
+		require.True(t, deadline.After(before))
+		require.True(t, deadline.Before(after))
+	})
+}
+
+func TestWaitForRetryHonorsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err := waitForRetry(ctx, 30)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Less(t, time.Since(start), 100*time.Millisecond)
 }
