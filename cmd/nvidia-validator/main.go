@@ -130,6 +130,7 @@ var (
 	cleanupAllFlag                  bool
 	outputDirFlag                   string
 	sleepIntervalSecondsFlag        int
+	maxWaitSecondsFlag              int
 	migStrategyFlag                 string
 	metricsPort                     int
 	defaultGPUWorkloadConfigFlag    string
@@ -326,6 +327,13 @@ func main() {
 			Destination: &sleepIntervalSecondsFlag,
 			Sources:     cli.EnvVars("SLEEP_INTERVAL_SECONDS"),
 		},
+		&cli.IntFlag{
+			Name:        "max-wait-seconds",
+			Value:       0,
+			Usage:       "maximum retry duration when --with-wait is enabled; 0 retries indefinitely",
+			Destination: &maxWaitSecondsFlag,
+			Sources:     cli.EnvVars("MAX_WAIT_SECONDS"),
+		},
 		&cli.StringFlag{
 			Name:        "mig-strategy",
 			Aliases:     []string{"m"},
@@ -440,6 +448,9 @@ func validateFlags(ctx context.Context, cli *cli.Command) (context.Context, erro
 	}
 	if nodeNameFlag == "" && (componentFlag == "vfio-pci" || componentFlag == "vgpu-manager" || componentFlag == "vgpu-devices") {
 		return ctx, fmt.Errorf("invalid -n <node-name> flag: must not be empty string for %s validation", componentFlag)
+	}
+	if maxWaitSecondsFlag < 0 {
+		return ctx, fmt.Errorf("invalid --max-wait-seconds flag: must be >= 0")
 	}
 
 	return ctx, nil
@@ -664,9 +675,35 @@ func runCommand(command string, args []string, silent bool) error {
 	return cmd.Run()
 }
 
+func retryContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if maxWaitSecondsFlag == 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, time.Duration(maxWaitSecondsFlag)*time.Second)
+}
+
+func waitForRetry(ctx context.Context, sleepSeconds int) error {
+	timer := time.NewTimer(time.Duration(sleepSeconds) * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func retryBudgetError(lastErr error) error {
+	return fmt.Errorf("validation did not succeed within %d seconds: %w", maxWaitSecondsFlag, lastErr)
+}
+
 func runCommandWithWait(command string, args []string, sleepSeconds int, silent bool) error {
+	ctx, cancel := retryContext(context.Background())
+	defer cancel()
+
 	for {
-		cmd := exec.Command(command, args...)
+		cmd := exec.CommandContext(ctx, command, args...)
 		if !silent {
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
@@ -675,8 +712,13 @@ func runCommandWithWait(command string, args []string, sleepSeconds int, silent 
 		err := cmd.Run()
 		if err != nil {
 			log.Warningf("error running command: %v", err)
+			if ctx.Err() != nil {
+				return retryBudgetError(err)
+			}
 			fmt.Printf("command failed, retrying after %d seconds\n", sleepSeconds)
-			time.Sleep(time.Duration(sleepSeconds) * time.Second)
+			if waitErr := waitForRetry(ctx, sleepSeconds); waitErr != nil {
+				return retryBudgetError(err)
+			}
 			continue
 		}
 		return nil
@@ -757,7 +799,14 @@ func nvidiaSMIArgs() []string {
 	return nil
 }
 
-func validateDriverContainer(silent bool, driverManagedByOperator bool) error {
+func validateDriverContainer(ctx context.Context, silent bool, driverManagedByOperator bool) error {
+	retryCtx := ctx
+	cancel := func() {}
+	if withWaitFlag {
+		retryCtx, cancel = retryContext(ctx)
+	}
+	defer cancel()
+
 	if driverManagedByOperator {
 		log.Infof("Driver is not pre-installed on the host and is managed by GPU Operator. Checking driver container status.")
 		if err := assertDriverContainerReady(silent); err != nil {
@@ -777,7 +826,7 @@ func validateDriverContainer(silent bool, driverManagedByOperator bool) error {
 		if err != nil {
 			return fmt.Errorf("failed to locate nvidia-smi: %w", err)
 		}
-		cmd := exec.Command(nvidiaSMIPath, nvidiaSMIArgs()...)
+		cmd := exec.CommandContext(retryCtx, nvidiaSMIPath, nvidiaSMIArgs()...)
 		// In order for nvidia-smi to run, we need to update LD_PRELOAD to include the path to libnvidia-ml.so.1.
 		cmd.Env = utils.SetEnvVar(os.Environ(), "LD_PRELOAD", utils.PrependPathListEnvvar("LD_PRELOAD", driverLibraryPath))
 		if !silent {
@@ -794,8 +843,13 @@ func validateDriverContainer(silent bool, driverManagedByOperator bool) error {
 			if !withWaitFlag {
 				return fmt.Errorf("error validating driver: %w", err)
 			}
+			if retryCtx.Err() != nil {
+				return retryBudgetError(err)
+			}
 			log.Warningf("failed to validate the driver, retrying after %d seconds\n", sleepIntervalSecondsFlag)
-			time.Sleep(time.Duration(sleepIntervalSecondsFlag) * time.Second)
+			if waitErr := waitForRetry(retryCtx, sleepIntervalSecondsFlag); waitErr != nil {
+				return retryBudgetError(err)
+			}
 			continue
 		}
 		return nil
@@ -818,7 +872,7 @@ func (d *Driver) runValidation(silent bool) (driverInfo, error) {
 		return driverInfo{}, fmt.Errorf("error checking if driver is managed by GPU Operator: %w", err)
 	}
 
-	err = validateDriverContainer(silent, driverManagedByOperator)
+	err = validateDriverContainer(d.ctx, silent, driverManagedByOperator)
 	if err != nil {
 		return driverInfo{}, err
 	}
@@ -1942,6 +1996,9 @@ func (v *VGPUDevices) runValidation() error {
 		return nil
 	}
 
+	retryCtx, cancel := retryContext(v.ctx)
+	defer cancel()
+
 	for {
 		numDevices := len(vGPUDevices)
 		if numDevices > 0 {
@@ -1949,7 +2006,9 @@ func (v *VGPUDevices) runValidation() error {
 			return nil
 		}
 		log.Infof("No vGPU devices found, retrying after %d seconds", sleepIntervalSecondsFlag)
-		time.Sleep(time.Duration(sleepIntervalSecondsFlag) * time.Second)
+		if waitErr := waitForRetry(retryCtx, sleepIntervalSecondsFlag); waitErr != nil {
+			return retryBudgetError(fmt.Errorf("no vGPU devices found"))
+		}
 
 		vGPUDevices, err = nvmdev.GetAllDevices()
 		if err != nil {
